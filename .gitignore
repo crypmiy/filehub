@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+filehub.env
+*.filehub.tmp
+.DS_Store

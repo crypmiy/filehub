@@ -1,0 +1,14 @@
+[Unit]
+Description=filehub file manager
+After=network-online.target
+
+[Service]
+User=jetson
+WorkingDirectory=/home/jetson/filehub
+EnvironmentFile=/home/jetson/filehub/filehub.env
+ExecStart=/home/jetson/filehub/.venv/bin/python /home/jetson/filehub/filehub.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
