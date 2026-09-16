@@ -5,6 +5,13 @@ penomoran mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-15
+
+### Ditambahkan
+- Tombol "Unduh" pada baris aksi pilihan: satu file terpilih langsung terunduh
+  apa adanya, beberapa item terpilih dibungkus jadi satu arsip `.zip`.
+- Endpoint `GET /api/bundle` yang menerima banyak parameter `paths`.
+
 ## [1.0.0] - 2026-09-15
 
 Rilis pertama.
@@ -26,5 +33,6 @@ Rilis pertama.
 - Password dibandingkan dengan `hmac.compare_digest` dan diberi jeda saat gagal.
 - Default bind ke `127.0.0.1`; akses dari luar diharapkan lewat Tailscale.
 
-[Unreleased]: https://github.com/crypmiy/filehub/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/crypmiy/filehub/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/crypmiy/filehub/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/crypmiy/filehub/releases/tag/v1.0.0

@@ -11,7 +11,7 @@ lewat lembar geser, dan tombol besar yang enak ditekan dengan jempol.
 
 - Jelajah direktori dengan breadcrumb, ukuran, waktu ubah, dan mode file
 - Unggah banyak file sekaligus, termasuk seret-dan-lepas
-- Unduh file satuan, atau satu folder penuh sebagai `.zip`
+- Unduh file satuan, satu folder penuh, atau beberapa item terpilih sebagai `.zip`
 - Editor teks bawaan untuk file di bawah 2 MB, penyimpanan atomik
 - Pratinjau gambar langsung di halaman
 - Buat folder, buat file, ganti nama, pindahkan, hapus massal
