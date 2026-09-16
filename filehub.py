@@ -29,7 +29,7 @@ import zipfile
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -40,7 +40,7 @@ from fastapi.responses import (
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 ROOT = Path(os.environ.get("FILEHUB_ROOT", "/home/jetson")).expanduser().resolve()
 PASSWORD = os.environ.get("FILEHUB_PASSWORD", "")
@@ -264,6 +264,50 @@ def zip_folder(path: str = ""):
     name = (target.name or "root") + ".zip"
     return FileResponse(
         tmp.name, media_type="application/zip", filename=name,
+        background=BackgroundTask(lambda: os.unlink(tmp.name)),
+    )
+
+
+@app.get("/api/bundle", dependencies=[Depends(require)])
+def bundle(paths: List[str] = Query(default=[]), name: str = "pilihan"):
+    """Unduh beberapa item terpilih sekaligus sebagai satu arsip .zip."""
+    targets = [resolve(p) for p in paths if p]
+    if not targets:
+        raise HTTPException(status_code=400, detail="Tidak ada item yang dipilih.")
+    if len(targets) == 1 and targets[0].is_file():
+        return download(relname(targets[0]))
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    tmp.close()
+    used: set[str] = set()
+
+    def arcname(base: str) -> str:
+        candidate, stem, n = base, base, 1
+        while candidate in used:
+            head, dot, tail = stem.partition(".")
+            candidate = f"{head} ({n}){dot}{tail}"
+            n += 1
+        used.add(candidate)
+        return candidate
+
+    with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED, compresslevel=5) as zf:
+        for target in targets:
+            if target == ROOT:
+                continue
+            try:
+                if target.is_file() and not target.is_symlink():
+                    zf.write(target, arcname(target.name))
+                elif target.is_dir():
+                    top = arcname(target.name)
+                    for file in target.rglob("*"):
+                        if file.is_file() and not file.is_symlink():
+                            zf.write(file, f"{top}/{file.relative_to(target)}")
+            except (PermissionError, OSError):
+                continue
+
+    safe_name = "".join(c for c in name if c.isalnum() or c in "-_ ").strip() or "pilihan"
+    return FileResponse(
+        tmp.name, media_type="application/zip", filename=f"{safe_name}.zip",
         background=BackgroundTask(lambda: os.unlink(tmp.name)),
     )
 
@@ -651,10 +695,25 @@ function drawSelectionBar() {
     const b = document.createElement('button'); b.className = 'act ' + cls;
     b.textContent = label; b.onclick = fn; bar.appendChild(b);
   };
-  mk('Pindahkan ke sini nanti', 'go', startMove);
+  mk('Unduh (' + picked.size + ')', 'go', downloadPicked);
+  mk('Pindahkan ke sini nanti', '', startMove);
   mk('Hapus (' + picked.size + ')', 'danger', () => confirmDelete([...picked]));
   mk('Batal pilih', '', () => { picked.clear(); draw(); });
   $('bar').after(bar);
+}
+
+function downloadPicked() {
+  const sel = [...picked];
+  if (!sel.length) return;
+  const only = items.find(i => i.rel === sel[0]);
+  if (sel.length === 1 && only && !only.dir) {
+    location.href = 'api/download?path=' + encodeURIComponent(sel[0]);
+    return;
+  }
+  const name = cwd ? cwd.split('/').pop() : 'filehub';
+  const q = sel.map(p => 'paths=' + encodeURIComponent(p)).join('&');
+  toast('Menyiapkan arsip ' + sel.length + ' item…');
+  location.href = 'api/bundle?name=' + encodeURIComponent(name) + '&' + q;
 }
 
 function toggle(rel) {
