@@ -84,6 +84,22 @@ Meski begitu, aplikasi ini ditujukan untuk jaringan pribadi. Biarkan bind pada
 `127.0.0.1` dan andalkan Tailscale sebagai lapisan akses. Jangan paparkan ke
 internet publik lewat Funnel atau reverse proxy terbuka.
 
+## Versi
+
+Versi yang sedang berjalan bisa dicek lewat `curl -s http://127.0.0.1:8791/health`,
+dan tampil di pojok kiri atas antarmuka.
+
+Riwayat lengkap tiap rilis ada di [CHANGELOG.md](CHANGELOG.md).
+Berkas rilis dan catatannya ada di
+[halaman Releases](https://github.com/crypmiy/filehub/releases).
+
+| Versi | Ringkasan |
+| --- | --- |
+| 1.3.0 | Pilihan bahasa Indonesia/Inggris, perbaikan menu aksi yang terpotong |
+| 1.2.0 | Salin/potong/tempel, duplikat, ekstrak arsip, cari, urutkan, `chmod +x` |
+| 1.1.0 | Unduh beberapa item terpilih sekaligus sebagai `.zip` |
+| 1.0.0 | Rilis pertama |
+
 ## Lisensi
 
 MIT. Lihat [LICENSE](LICENSE).
