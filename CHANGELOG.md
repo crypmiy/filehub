@@ -5,6 +5,29 @@ penomoran mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-23
+
+### Ditambahkan
+- Papan klip: pilih item lalu **Salin** atau **Potong**, buka folder tujuan, tekan
+  tombol tempel. Nama yang bentrok otomatis diberi akhiran `(1)`, `(2)`, dan seterusnya.
+- **Duplikat** satu item di tempat, tanpa perlu berpindah folder.
+- **Ekstrak** arsip `.zip`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, dan `.tar.xz`
+  ke folder baru di sebelahnya.
+- **Cari** berdasarkan nama file secara rekursif dari folder yang sedang dibuka.
+- Urutkan daftar menurut nama, ukuran, atau waktu ubah.
+- Tombol tampilkan/sembunyikan berkas bertitik, dan pilih semua/batal pilih.
+- Ubah izin jalankan berkas (`chmod +x`) lewat menu aksi.
+- Endpoint baru: `POST /api/copy`, `/api/duplicate`, `/api/extract`, `/api/chmod`,
+  dan `GET /api/search`.
+
+### Diubah
+- Memindahkan berkas ke folder yang sudah punya nama sama tidak lagi menimpa diam-diam;
+  berkas baru diberi akhiran bernomor.
+
+### Keamanan
+- Ekstraksi arsip menolak entri yang menunjuk ke luar folder tujuan; arsip tar
+  diekstrak dengan filter `data` sehingga tautan simbolik dan berkas khusus diabaikan.
+
 ## [1.1.0] - 2026-09-15
 
 ### Ditambahkan
@@ -33,6 +56,7 @@ Rilis pertama.
 - Password dibandingkan dengan `hmac.compare_digest` dan diberi jeda saat gagal.
 - Default bind ke `127.0.0.1`; akses dari luar diharapkan lewat Tailscale.
 
-[Unreleased]: https://github.com/crypmiy/filehub/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/crypmiy/filehub/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/crypmiy/filehub/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/crypmiy/filehub/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/crypmiy/filehub/releases/tag/v1.0.0

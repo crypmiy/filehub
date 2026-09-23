@@ -23,6 +23,7 @@ import os
 import secrets
 import shutil
 import stat
+import tarfile
 import tempfile
 import time
 import zipfile
@@ -40,7 +41,7 @@ from fastapi.responses import (
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 ROOT = Path(os.environ.get("FILEHUB_ROOT", "/home/jetson")).expanduser().resolve()
 PASSWORD = os.environ.get("FILEHUB_PASSWORD", "")
@@ -117,6 +118,28 @@ def check_name(name: str) -> str:
     return name
 
 
+def unique(folder: Path, name: str) -> Path:
+    """Cari nama yang belum dipakai di folder tujuan: 'x.txt' -> 'x (1).txt'."""
+    target = folder / name
+    if not target.exists():
+        return target
+    base = Path(name)
+    stem, suffix = base.stem, base.suffix
+    n = 1
+    while True:
+        candidate = folder / f"{stem} ({n}){suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
+ARCHIVE_SUFFIX = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tar.xz")
+
+
+def is_archive(p: Path) -> bool:
+    return p.name.lower().endswith(ARCHIVE_SUFFIX)
+
+
 def describe(p: Path) -> dict:
     try:
         st = p.lstat()
@@ -135,6 +158,8 @@ def describe(p: Path) -> dict:
         "mode": stat.filemode(st.st_mode),
         "editable": (not is_dir) and (suffix in EDITABLE_SUFFIX or not suffix) and st.st_size <= TEXT_MAX,
         "image": (not is_dir) and suffix in PREVIEW_SUFFIX,
+        "archive": (not is_dir) and is_archive(p),
+        "exec": bool(st.st_mode & stat.S_IXUSR) and not is_dir,
     }
 
 
@@ -166,6 +191,11 @@ class SaveBody(BaseModel):
 class MoveBody(BaseModel):
     paths: List[str]
     dest: str = ""
+
+
+class ChmodBody(BaseModel):
+    path: str
+    executable: bool
 
 
 # ---------------------------------------------------------------- routes
@@ -378,9 +408,100 @@ def move(body: MoveBody):
         src = resolve(rel)
         if src == ROOT or src == dest or src in dest.parents:
             continue
-        shutil.move(str(src), str(dest / src.name))
+        shutil.move(str(src), str(unique(dest, src.name)))
         moved += 1
     return {"ok": True, "moved": moved}
+
+
+@app.post("/api/copy", dependencies=[Depends(require_write)])
+def copy(body: MoveBody):
+    dest = resolve(body.dest)
+    if not dest.is_dir():
+        raise HTTPException(status_code=400, detail="Tujuan bukan folder.")
+    copied = 0
+    for rel in body.paths:
+        src = resolve(rel)
+        if src == ROOT or src == dest or src in dest.parents:
+            continue
+        target = unique(dest, src.name)
+        if src.is_dir():
+            shutil.copytree(src, target, symlinks=True)
+        else:
+            shutil.copy2(src, target, follow_symlinks=False)
+        copied += 1
+    return {"ok": True, "copied": copied}
+
+
+@app.post("/api/duplicate", dependencies=[Depends(require_write)])
+def duplicate(body: PathBody):
+    src = resolve(body.path)
+    if src == ROOT:
+        raise HTTPException(status_code=400, detail="Root tidak bisa diduplikat.")
+    target = unique(src.parent, src.name)
+    if src.is_dir():
+        shutil.copytree(src, target, symlinks=True)
+    else:
+        shutil.copy2(src, target, follow_symlinks=False)
+    return {"ok": True, "rel": relname(target)}
+
+
+@app.post("/api/extract", dependencies=[Depends(require_write)])
+def extract(body: PathBody):
+    src = resolve(body.path)
+    if not src.is_file() or not is_archive(src):
+        raise HTTPException(status_code=400, detail="Bukan arsip yang didukung.")
+    out = unique(src.parent, src.name.split(".")[0] or "hasil-ekstrak")
+    out.mkdir()
+
+    def inside(name: str) -> bool:
+        target = (out / name).resolve()
+        return target == out or out in target.parents
+
+    try:
+        if src.name.lower().endswith(".zip"):
+            with zipfile.ZipFile(src) as zf:
+                members = [m for m in zf.namelist() if inside(m)]
+                zf.extractall(out, members=members)
+        else:
+            with tarfile.open(src) as tf:
+                tf.extractall(out, filter="data")
+    except Exception as exc:
+        shutil.rmtree(out, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"Gagal mengekstrak: {exc}")
+    return {"ok": True, "rel": relname(out)}
+
+
+@app.post("/api/chmod", dependencies=[Depends(require_write)])
+def chmod(body: ChmodBody):
+    target = resolve(body.path)
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="Hanya berlaku untuk file.")
+    mode = target.stat().st_mode
+    bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    target.chmod(mode | bits if body.executable else mode & ~bits)
+    return {"ok": True, "mode": stat.filemode(target.stat().st_mode)}
+
+
+@app.get("/api/search", dependencies=[Depends(require)])
+def search(path: str = "", q: str = "", limit: int = 300):
+    needle = q.strip().lower()
+    if len(needle) < 2:
+        raise HTTPException(status_code=400, detail="Kata kunci minimal 2 huruf.")
+    base = resolve(path)
+    if not base.is_dir():
+        raise HTTPException(status_code=404, detail="Folder tidak ditemukan.")
+    hits, truncated = [], False
+    for child in base.rglob("*"):
+        if needle not in child.name.lower():
+            continue
+        info = describe(child)
+        if info:
+            hits.append(info)
+        if len(hits) >= max(1, min(limit, 1000)):
+            truncated = True
+            break
+    hits.sort(key=lambda i: (not i["dir"], i["name"].lower()))
+    return {"items": hits, "truncated": truncated, "base": relname(base)}
 
 
 @app.post("/api/delete", dependencies=[Depends(require_write)])
@@ -541,6 +662,10 @@ footer{position:fixed;bottom:0;left:0;right:0;background:var(--panel);border-top
     <button class="act" id="bFolder">Folder baru</button>
     <button class="act" id="bFile">File baru</button>
     <button class="act" id="bZip">Unduh folder .zip</button>
+    <button class="act" id="bCari">Cari</button>
+    <button class="act" id="bSort">Urut: nama</button>
+    <button class="act" id="bHidden">Tampilkan tersembunyi</button>
+    <button class="act" id="bAll">Pilih semua</button>
     <button class="act" id="bReload">Muat ulang</button>
     <button class="act" id="bOut">Keluar</button>
   </div>
@@ -564,7 +689,9 @@ if (!location.pathname.endsWith('/')) history.replaceState(null, '', location.pa
 
 const $ = id => document.getElementById(id);
 const listEl = $('list'), sheet = $('sheet'), card = $('card');
-let cwd = '', items = [], picked = new Set(), cfg = {}, moving = null;
+let cwd = '', items = [], picked = new Set(), cfg = {};
+let clip = null, sortBy = 'name', showHidden = false, searching = false;
+const SORTS = {name: 'nama', size: 'ukuran', time: 'waktu'};
 
 const fmtSize = n => {
   if (n < 1024) return n + ' B';
@@ -624,7 +751,7 @@ function askLogin() {
 async function load(path) {
   try {
     const data = await api('api/list?path=' + encodeURIComponent(path));
-    cwd = data.path; picked.clear(); items = data.items;
+    cwd = data.path; picked.clear(); items = data.items; searching = false;
     drawCrumbs(data.crumbs); draw();
   } catch (e) { if (e.message !== 'unauth') toast(e.message, true); }
 }
@@ -645,12 +772,26 @@ function drawCrumbs(crumbs) {
   el.scrollLeft = el.scrollWidth;
 }
 
+function visible() {
+  let out = showHidden ? items.slice() : items.filter(i => !i.name.startsWith('.'));
+  const by = {
+    name: (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
+    size: (a, b) => b.size - a.size,
+    time: (a, b) => b.mtime - a.mtime,
+  }[sortBy];
+  out.sort((a, b) => (a.dir === b.dir ? by(a, b) : (a.dir ? -1 : 1)));
+  return out;
+}
+
 function draw() {
   listEl.innerHTML = '';
-  if (!items.length) {
-    listEl.innerHTML = '<div class="empty"><b>Folder ini kosong</b>Unggah file atau buat folder baru.</div>';
+  const rows = visible();
+  if (!rows.length) {
+    listEl.innerHTML = searching
+      ? '<div class="empty"><b>Tidak ada yang cocok</b>Coba kata kunci lain.</div>'
+      : '<div class="empty"><b>Folder ini kosong</b>Unggah file atau buat folder baru.</div>';
   }
-  for (const it of items) {
+  for (const it of rows) {
     const row = document.createElement('div');
     row.className = 'row' + (it.dir ? ' d' : '') + (picked.has(it.rel) ? ' sel' : '');
     row.tabIndex = 0;
@@ -667,7 +808,8 @@ function draw() {
     meta.className = 'meta';
     const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = it.name;
     const sub = document.createElement('span'); sub.className = 'sub';
-    sub.textContent = (it.dir ? 'folder' : fmtSize(it.size)) + '  ·  ' + fmtDate(it.mtime) + '  ·  ' + it.mode;
+    const where = searching ? (it.rel.split('/').slice(0, -1).join('/') || '/') + '  ·  ' : '';
+    sub.textContent = where + (it.dir ? 'folder' : fmtSize(it.size)) + '  ·  ' + fmtDate(it.mtime) + '  ·  ' + it.mode;
     meta.append(nm, sub);
 
     const chev = document.createElement('button');
@@ -681,8 +823,12 @@ function draw() {
     listEl.appendChild(row);
   }
   const n = picked.size;
-  $('count').textContent = n ? n + ' dipilih' : items.length + ' item';
+  $('count').textContent = n ? n + ' dipilih' : rows.length + ' item';
+  $('bSort').textContent = 'Urut: ' + SORTS[sortBy];
+  $('bHidden').textContent = showHidden ? 'Sembunyikan tersembunyi' : 'Tampilkan tersembunyi';
+  $('bAll').textContent = (n && n === rows.length) ? 'Batal pilih' : 'Pilih semua';
   drawSelectionBar();
+  drawClipBar();
 }
 
 function drawSelectionBar() {
@@ -696,10 +842,43 @@ function drawSelectionBar() {
     b.textContent = label; b.onclick = fn; bar.appendChild(b);
   };
   mk('Unduh (' + picked.size + ')', 'go', downloadPicked);
-  mk('Pindahkan ke sini nanti', '', startMove);
+  mk('Salin', '', () => setClip('copy'));
+  mk('Potong', '', () => setClip('move'));
   mk('Hapus (' + picked.size + ')', 'danger', () => confirmDelete([...picked]));
   mk('Batal pilih', '', () => { picked.clear(); draw(); });
   $('bar').after(bar);
+}
+
+function drawClipBar() {
+  let bar = document.getElementById('clipbar');
+  if (bar) bar.remove();
+  if (!clip) return;
+  bar = document.createElement('div');
+  bar.id = 'clipbar'; bar.className = 'bar'; bar.style.marginTop = '2px';
+  const verb = clip.mode === 'copy' ? 'Salin' : 'Pindahkan';
+  const mk = (label, cls, fn) => {
+    const b = document.createElement('button'); b.className = 'act ' + cls;
+    b.textContent = label; b.onclick = fn; bar.appendChild(b);
+  };
+  mk(verb + ' ' + clip.paths.length + ' item ke sini', 'go', pasteHere);
+  mk('Batalkan papan klip', '', () => { clip = null; draw(); });
+  ($('selbar') || $('bar')).after(bar);
+}
+
+function setClip(mode) {
+  clip = {mode, paths: [...picked]};
+  picked.clear(); draw();
+  toast('Buka folder tujuan, lalu tekan tombol tempel');
+}
+
+async function pasteHere() {
+  const url = clip.mode === 'copy' ? 'api/copy' : 'api/move';
+  try {
+    const r = await api(url, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({paths: clip.paths, dest: cwd})});
+    toast((r.copied ?? r.moved) + ' item ' + (clip.mode === 'copy' ? 'disalin' : 'dipindah'));
+    clip = null; load(cwd);
+  } catch (e) { toast(e.message, true); }
 }
 
 function downloadPicked() {
@@ -751,7 +930,11 @@ function actions(it) {
       add('Buka di tab baru', () => { window.open('api/download?inline=1&path=' + encodeURIComponent(it.rel), '_blank'); closeSheet(); });
     }
     if (!ro) {
+      if (it.archive) add('Ekstrak di sini', () => runAction('api/extract', {path: it.rel}, 'Arsip diekstrak'));
+      add('Duplikat', () => runAction('api/duplicate', {path: it.rel}, 'Salinan dibuat'));
       add('Ganti nama', () => renameItem(it));
+      if (!it.dir) add(it.exec ? 'Cabut izin jalankan' : 'Jadikan bisa dijalankan',
+        () => runAction('api/chmod', {path: it.rel, executable: !it.exec}, 'Izin diubah'));
       add('Hapus', () => confirmDelete([it.rel]), 'danger');
     }
   });
@@ -794,24 +977,34 @@ function confirmDelete(paths) {
   });
 }
 
-// ---------- move
-function startMove() {
-  moving = [...picked];
-  picked.clear(); draw();
-  toast('Buka folder tujuan, lalu tekan "Tempel di sini"');
-  let b = document.getElementById('pasteBtn');
-  if (!b) {
-    b = document.createElement('button');
-    b.id = 'pasteBtn'; b.className = 'act go'; b.textContent = 'Tempel di sini';
-    b.onclick = async () => {
+// ---------- aksi umum & pencarian
+async function runAction(url, body, okMsg) {
+  try {
+    await api(url, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body)});
+    closeSheet(); toast(okMsg); load(cwd);
+  } catch (e) { toast(e.message, true); }
+}
+
+function askSearch() {
+  openSheet(`
+    <h2>Cari di folder ini</h2>
+    <p>termasuk semua subfolder</p>
+    <input type="text" id="q" placeholder="nama file atau sebagian nama">
+    <div class="ends"><button class="act" id="no">Batal</button><button class="act go" id="ok">Cari</button></div>`, () => {
+    $('no').onclick = closeSheet;
+    const go = async () => {
+      const q = $('q').value.trim();
       try {
-        const r = await api('api/move', {method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({paths: moving, dest: cwd})});
-        toast(r.moved + ' item dipindah'); moving = null; b.remove(); load(cwd);
+        const data = await api('api/search?path=' + encodeURIComponent(cwd) + '&q=' + encodeURIComponent(q));
+        closeSheet();
+        items = data.items; picked.clear(); searching = true; draw();
+        toast(data.items.length + ' hasil' + (data.truncated ? ' (dipotong)' : '') + ' untuk "' + q + '"');
       } catch (e) { toast(e.message, true); }
     };
-    $('bar').prepend(b);
-  }
+    $('ok').onclick = go;
+    $('q').onkeydown = e => { if (e.key === 'Enter') go(); };
+  });
 }
 
 // ---------- editor & preview
@@ -897,6 +1090,19 @@ $('bFolder').onclick = () => creator('dir');
 $('bFile').onclick = () => creator('file');
 $('bZip').onclick = () => location.href = 'api/zip?path=' + encodeURIComponent(cwd);
 $('bReload').onclick = () => load(cwd);
+$('bCari').onclick = askSearch;
+$('bSort').onclick = () => {
+  const keys = Object.keys(SORTS);
+  sortBy = keys[(keys.indexOf(sortBy) + 1) % keys.length];
+  draw();
+};
+$('bHidden').onclick = () => { showHidden = !showHidden; picked.clear(); draw(); };
+$('bAll').onclick = () => {
+  const rows = visible();
+  if (picked.size === rows.length) picked.clear();
+  else rows.forEach(i => picked.add(i.rel));
+  draw();
+};
 $('bOut').onclick = async () => { await fetch('api/logout', {method:'POST'}); location.reload(); };
 
 // ---------- boot

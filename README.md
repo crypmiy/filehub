@@ -14,7 +14,11 @@ lewat lembar geser, dan tombol besar yang enak ditekan dengan jempol.
 - Unduh file satuan, satu folder penuh, atau beberapa item terpilih sebagai `.zip`
 - Editor teks bawaan untuk file di bawah 2 MB, penyimpanan atomik
 - Pratinjau gambar langsung di halaman
-- Buat folder, buat file, ganti nama, pindahkan, hapus massal
+- Buat folder, buat file, ganti nama, duplikat, hapus massal
+- Salin dan pindahkan lewat papan klip, dengan penanganan nama bentrok
+- Ekstrak arsip `.zip` dan `.tar.*` ke folder baru
+- Cari nama berkas secara rekursif, urutkan menurut nama/ukuran/waktu
+- Tampilkan berkas bertitik, pilih semua, ubah izin jalankan (`chmod +x`)
 - Login password opsional, mode baca saja, indikator sisa disk
 
 ## Pemasangan
