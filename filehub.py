@@ -41,7 +41,7 @@ from fastapi.responses import (
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 ROOT = Path(os.environ.get("FILEHUB_ROOT", "/home/jetson")).expanduser().resolve()
 PASSWORD = os.environ.get("FILEHUB_PASSWORD", "")
@@ -57,6 +57,39 @@ EDITABLE_SUFFIX = {
     ".c", ".h", ".cpp", ".java", ".rb", ".php", ".lua", ".gitignore",
 }
 PREVIEW_SUFFIX = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico"}
+
+ERRORS = {
+    "outside_root": "Path di luar root.",
+    "no_folder": "Folder tidak ditemukan.",
+    "no_perm_read": "Tidak ada izin baca folder ini.",
+    "no_file": "File tidak ditemukan.",
+    "too_big": "File terlalu besar untuk diedit di sini.",
+    "not_text": "Bukan file teks.",
+    "is_dir": "Itu folder, bukan file.",
+    "exists": "Sudah ada yang bernama itu.",
+    "bad_name": "Nama tidak valid.",
+    "root_locked": "Root tidak bisa diubah.",
+    "dest_not_folder": "Tujuan bukan folder.",
+    "not_dir_zip": "Hanya folder yang bisa di-zip.",
+    "nothing_selected": "Tidak ada item yang dipilih.",
+    "not_archive": "Bukan arsip yang didukung.",
+    "extract_failed": "Gagal mengekstrak arsip.",
+    "only_file": "Hanya berlaku untuk file.",
+    "query_short": "Kata kunci minimal 2 huruf.",
+    "bad_password": "Password salah.",
+    "unauth": "Sesi habis. Login lagi.",
+    "readonly": "Mode baca saja aktif.",
+}
+
+
+class AppError(HTTPException):
+    """Galat dengan kode tetap, supaya antarmuka bisa menerjemahkannya sendiri."""
+
+    def __init__(self, status: int, code: str, extra: str = ""):
+        detail = ERRORS.get(code, code)
+        super().__init__(status_code=status, detail=f"{detail} {extra}".strip())
+        self.code = code
+
 
 app = FastAPI(title="filehub", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -88,13 +121,13 @@ def authed(request: Request) -> bool:
 
 def require(request: Request) -> None:
     if not authed(request):
-        raise HTTPException(status_code=401, detail="Sesi habis. Login lagi.")
+        raise AppError(401, "unauth")
 
 
 def require_write(request: Request) -> None:
     require(request)
     if READONLY:
-        raise HTTPException(status_code=403, detail="Mode baca saja aktif.")
+        raise AppError(403, "readonly")
 
 
 # ---------------------------------------------------------------- paths
@@ -103,7 +136,7 @@ def resolve(rel: str) -> Path:
     rel = (rel or "").strip().lstrip("/")
     target = (ROOT / rel).resolve() if rel else ROOT
     if target != ROOT and ROOT not in target.parents:
-        raise HTTPException(status_code=400, detail="Path di luar root.")
+        raise AppError(400, "outside_root")
     return target
 
 
@@ -114,7 +147,7 @@ def relname(p: Path) -> str:
 def check_name(name: str) -> str:
     name = (name or "").strip()
     if not name or "/" in name or "\\" in name or name in {".", ".."}:
-        raise HTTPException(status_code=400, detail="Nama tidak valid.")
+        raise AppError(400, "bad_name")
     return name
 
 
@@ -206,7 +239,7 @@ def login(password: str = Form(...)):
         return {"ok": True}
     if not hmac.compare_digest(password, PASSWORD):
         time.sleep(0.7)
-        raise HTTPException(status_code=401, detail="Password salah.")
+        raise AppError(401, "bad_password")
     resp = JSONResponse({"ok": True})
     resp.set_cookie(
         COOKIE, sign(str(int(time.time()))),
@@ -240,12 +273,12 @@ def config(request: Request):
 def listing(path: str = ""):
     target = resolve(path)
     if not target.is_dir():
-        raise HTTPException(status_code=404, detail="Folder tidak ditemukan.")
+        raise AppError(404, "no_folder")
     items = []
     try:
         entries = list(target.iterdir())
     except PermissionError:
-        raise HTTPException(status_code=403, detail="Tidak ada izin baca folder ini.")
+        raise AppError(403, "no_perm_read")
     for child in entries:
         info = describe(child)
         if info:
@@ -267,7 +300,7 @@ def listing(path: str = ""):
 def download(path: str, inline: int = 0):
     target = resolve(path)
     if not target.is_file():
-        raise HTTPException(status_code=404, detail="File tidak ditemukan.")
+        raise AppError(404, "no_file")
     media, _ = mimetypes.guess_type(target.name)
     return FileResponse(
         target,
@@ -281,7 +314,7 @@ def download(path: str, inline: int = 0):
 def zip_folder(path: str = ""):
     target = resolve(path)
     if not target.is_dir():
-        raise HTTPException(status_code=400, detail="Hanya folder yang bisa di-zip.")
+        raise AppError(400, "not_dir_zip")
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
     tmp.close()
     with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED, compresslevel=5) as zf:
@@ -303,7 +336,7 @@ def bundle(paths: List[str] = Query(default=[]), name: str = "pilihan"):
     """Unduh beberapa item terpilih sekaligus sebagai satu arsip .zip."""
     targets = [resolve(p) for p in paths if p]
     if not targets:
-        raise HTTPException(status_code=400, detail="Tidak ada item yang dipilih.")
+        raise AppError(400, "nothing_selected")
     if len(targets) == 1 and targets[0].is_file():
         return download(relname(targets[0]))
 
@@ -346,20 +379,20 @@ def bundle(paths: List[str] = Query(default=[]), name: str = "pilihan"):
 def read_file(path: str):
     target = resolve(path)
     if not target.is_file():
-        raise HTTPException(status_code=404, detail="File tidak ditemukan.")
+        raise AppError(404, "no_file")
     if target.stat().st_size > TEXT_MAX:
-        raise HTTPException(status_code=413, detail="File terlalu besar untuk diedit di sini.")
+        raise AppError(413, "too_big")
     try:
         return {"content": target.read_text(encoding="utf-8")}
     except UnicodeDecodeError:
-        raise HTTPException(status_code=415, detail="Bukan file teks.")
+        raise AppError(415, "not_text")
 
 
 @app.post("/api/save", dependencies=[Depends(require_write)])
 def save_file(body: SaveBody):
     target = resolve(body.path)
     if target.is_dir():
-        raise HTTPException(status_code=400, detail="Itu folder, bukan file.")
+        raise AppError(400, "is_dir")
     tmp = target.with_name(target.name + ".filehub.tmp")
     tmp.write_text(body.content, encoding="utf-8")
     os.replace(tmp, target)
@@ -371,7 +404,7 @@ def mkdir(body: NameBody):
     parent = resolve(body.path)
     target = parent / check_name(body.name)
     if target.exists():
-        raise HTTPException(status_code=409, detail="Sudah ada yang bernama itu.")
+        raise AppError(409, "exists")
     target.mkdir(parents=False)
     return {"ok": True, "rel": relname(target)}
 
@@ -381,7 +414,7 @@ def newfile(body: NameBody):
     parent = resolve(body.path)
     target = parent / check_name(body.name)
     if target.exists():
-        raise HTTPException(status_code=409, detail="Sudah ada yang bernama itu.")
+        raise AppError(409, "exists")
     target.touch()
     return {"ok": True, "rel": relname(target)}
 
@@ -390,10 +423,10 @@ def newfile(body: NameBody):
 def rename(body: RenameBody):
     target = resolve(body.path)
     if target == ROOT:
-        raise HTTPException(status_code=400, detail="Root tidak bisa diganti nama.")
+        raise AppError(400, "root_locked")
     dest = target.with_name(check_name(body.name))
     if dest.exists():
-        raise HTTPException(status_code=409, detail="Sudah ada yang bernama itu.")
+        raise AppError(409, "exists")
     target.rename(dest)
     return {"ok": True, "rel": relname(dest)}
 
@@ -402,7 +435,7 @@ def rename(body: RenameBody):
 def move(body: MoveBody):
     dest = resolve(body.dest)
     if not dest.is_dir():
-        raise HTTPException(status_code=400, detail="Tujuan bukan folder.")
+        raise AppError(400, "dest_not_folder")
     moved = 0
     for rel in body.paths:
         src = resolve(rel)
@@ -417,7 +450,7 @@ def move(body: MoveBody):
 def copy(body: MoveBody):
     dest = resolve(body.dest)
     if not dest.is_dir():
-        raise HTTPException(status_code=400, detail="Tujuan bukan folder.")
+        raise AppError(400, "dest_not_folder")
     copied = 0
     for rel in body.paths:
         src = resolve(rel)
@@ -436,7 +469,7 @@ def copy(body: MoveBody):
 def duplicate(body: PathBody):
     src = resolve(body.path)
     if src == ROOT:
-        raise HTTPException(status_code=400, detail="Root tidak bisa diduplikat.")
+        raise AppError(400, "root_locked")
     target = unique(src.parent, src.name)
     if src.is_dir():
         shutil.copytree(src, target, symlinks=True)
@@ -449,7 +482,7 @@ def duplicate(body: PathBody):
 def extract(body: PathBody):
     src = resolve(body.path)
     if not src.is_file() or not is_archive(src):
-        raise HTTPException(status_code=400, detail="Bukan arsip yang didukung.")
+        raise AppError(400, "not_archive")
     out = unique(src.parent, src.name.split(".")[0] or "hasil-ekstrak")
     out.mkdir()
 
@@ -467,7 +500,7 @@ def extract(body: PathBody):
                 tf.extractall(out, filter="data")
     except Exception as exc:
         shutil.rmtree(out, ignore_errors=True)
-        raise HTTPException(status_code=400, detail=f"Gagal mengekstrak: {exc}")
+        raise AppError(400, "extract_failed", str(exc))
     return {"ok": True, "rel": relname(out)}
 
 
@@ -475,7 +508,7 @@ def extract(body: PathBody):
 def chmod(body: ChmodBody):
     target = resolve(body.path)
     if not target.is_file():
-        raise HTTPException(status_code=400, detail="Hanya berlaku untuk file.")
+        raise AppError(400, "only_file")
     mode = target.stat().st_mode
     bits = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
     target.chmod(mode | bits if body.executable else mode & ~bits)
@@ -486,10 +519,10 @@ def chmod(body: ChmodBody):
 def search(path: str = "", q: str = "", limit: int = 300):
     needle = q.strip().lower()
     if len(needle) < 2:
-        raise HTTPException(status_code=400, detail="Kata kunci minimal 2 huruf.")
+        raise AppError(400, "query_short")
     base = resolve(path)
     if not base.is_dir():
-        raise HTTPException(status_code=404, detail="Folder tidak ditemukan.")
+        raise AppError(404, "no_folder")
     hits, truncated = [], False
     for child in base.rglob("*"):
         if needle not in child.name.lower():
@@ -523,7 +556,7 @@ def delete(body: DeleteBody):
 async def upload(path: str = Form(""), files: List[UploadFile] = File(...)):
     parent = resolve(path)
     if not parent.is_dir():
-        raise HTTPException(status_code=400, detail="Tujuan upload bukan folder.")
+        raise AppError(400, "dest_not_folder")
     saved = []
     for item in files:
         name = check_name(os.path.basename(item.filename or ""))
@@ -547,7 +580,11 @@ def index():
 
 @app.exception_handler(HTTPException)
 async def http_error(request: Request, exc: HTTPException):
-    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    body = {"detail": exc.detail}
+    code = getattr(exc, "code", None)
+    if code:
+        body["code"] = code
+    return JSONResponse(body, status_code=exc.status_code)
 
 
 # ---------------------------------------------------------------- frontend
@@ -574,7 +611,7 @@ button,input,textarea{font:inherit;color:inherit}
 button{cursor:pointer;background:none;border:none}
 
 header{position:sticky;top:0;z-index:20;background:var(--panel);border-bottom:1px solid var(--line);
-       padding:10px 14px calc(10px + env(safe-area-inset-bottom,0px)/6);display:flex;flex-direction:column;gap:9px}
+       padding:10px 14px;display:flex;flex-direction:column;gap:9px}
 .top{display:flex;align-items:center;gap:10px}
 .brand{font-family:var(--mono);font-size:14px;letter-spacing:.02em;color:var(--accent)}
 .brand em{font-style:normal;color:var(--dim);font-size:11px;margin-left:5px}
@@ -607,7 +644,8 @@ main{flex:1;overflow-y:auto;padding:4px 0 90px}
 .meta{min-width:0;flex:1}
 .nm{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14.5px}
 .row.d .nm{color:#ecd9bd}
-.sub{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:2px}
+.sub{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:2px;display:block;
+     overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chev{color:var(--dim);font-size:18px;padding:0 2px}
 
 .empty{padding:44px 22px;text-align:center;color:var(--dim);line-height:1.6}
@@ -623,21 +661,23 @@ footer{position:fixed;bottom:0;left:0;right:0;background:var(--panel);border-top
        justify-content:center;backdrop-filter:blur(2px)}
 .sheet.on{display:flex}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:14px 14px 0 0;width:100%;max-width:640px;
-      padding:16px 16px calc(16px + env(safe-area-inset-bottom,0px));max-height:92vh;display:flex;flex-direction:column;gap:11px}
+      padding:16px 16px calc(16px + env(safe-area-inset-bottom,0px));max-height:92vh;display:flex;
+      flex-direction:column;gap:11px;overflow:hidden}
 @media(min-width:680px){.sheet{align-items:center}.card{border-radius:12px}}
-.card h2{margin:0;font-size:15px;font-weight:600}
-.card p{margin:0;font-size:13px;color:var(--dim);font-family:var(--mono);word-break:break-all}
+.card h2{margin:0;font-size:15px;font-weight:600;flex:none}
+.card p{margin:0;font-size:13px;color:var(--dim);font-family:var(--mono);word-break:break-all;flex:none;
+        white-space:pre-line}
 .card input[type=text],.card input[type=password]{width:100%;background:var(--ink);border:1px solid var(--line);
-      border-radius:8px;padding:10px 11px;font-family:var(--mono);font-size:14px}
+      border-radius:8px;padding:10px 11px;font-family:var(--mono);font-size:14px;flex:none}
 .card input:focus,.act:focus-visible,.row:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 .card textarea{width:100%;flex:1;min-height:46vh;background:var(--ink);border:1px solid var(--line);border-radius:8px;
       padding:11px;font-family:var(--mono);font-size:13px;line-height:1.55;resize:none;white-space:pre;overflow-wrap:normal}
 .card img{max-width:100%;max-height:66vh;object-fit:contain;border-radius:8px;background:#0d1116}
-.opts{display:flex;flex-direction:column;gap:1px}
-.opt{text-align:left;padding:11px 4px;border-bottom:1px solid #232c37;font-size:14px}
+.opts{display:flex;flex-direction:column;gap:1px;overflow-y:auto;min-height:0;flex:1}
+.opt{text-align:left;padding:12px 4px;border-bottom:1px solid #232c37;font-size:14px;flex:none}
 .opt:last-child{border-bottom:none}
 .opt.danger{color:var(--danger)}
-.ends{display:flex;gap:8px;justify-content:flex-end;padding-top:2px}
+.ends{display:flex;gap:8px;justify-content:flex-end;padding-top:2px;flex:none}
 .msg{position:fixed;left:50%;transform:translateX(-50%);bottom:58px;background:var(--panel-2);
      border:1px solid var(--line);border-radius:8px;padding:9px 14px;font-size:13px;z-index:60;
      opacity:0;transition:opacity .18s;pointer-events:none;max-width:88vw;text-align:center}
@@ -658,16 +698,17 @@ footer{position:fixed;bottom:0;left:0;right:0;background:var(--panel);border-top
   </div>
   <nav class="crumbs" id="crumbs"></nav>
   <div class="bar" id="bar">
-    <button class="act go" id="bUp">Unggah</button>
-    <button class="act" id="bFolder">Folder baru</button>
-    <button class="act" id="bFile">File baru</button>
-    <button class="act" id="bZip">Unduh folder .zip</button>
-    <button class="act" id="bCari">Cari</button>
-    <button class="act" id="bSort">Urut: nama</button>
-    <button class="act" id="bHidden">Tampilkan tersembunyi</button>
-    <button class="act" id="bAll">Pilih semua</button>
-    <button class="act" id="bReload">Muat ulang</button>
-    <button class="act" id="bOut">Keluar</button>
+    <button class="act go" id="bUp"></button>
+    <button class="act" id="bFolder"></button>
+    <button class="act" id="bFile"></button>
+    <button class="act" id="bZip"></button>
+    <button class="act" id="bCari"></button>
+    <button class="act" id="bSort"></button>
+    <button class="act" id="bHidden"></button>
+    <button class="act" id="bAll"></button>
+    <button class="act" id="bReload"></button>
+    <button class="act" id="bLang"></button>
+    <button class="act" id="bOut"></button>
   </div>
 </header>
 
@@ -680,18 +721,131 @@ footer{position:fixed;bottom:0;left:0;right:0;background:var(--panel);border-top
 </footer>
 
 <div class="sheet" id="sheet"><div class="card" id="card"></div></div>
-<div class="drop" id="drop">Lepas file untuk mengunggah</div>
+<div class="drop" id="drop"><span id="dropText"></span></div>
 <div class="msg" id="msg"></div>
 <input type="file" id="picker" multiple hidden>
 
 <script>
 if (!location.pathname.endsWith('/')) history.replaceState(null, '', location.pathname + '/');
 
+// ---------- bahasa / language
+const L = {
+  id: {
+    locale: 'id-ID',
+    langBtn: 'English',
+    upload: 'Unggah', newFolder: 'Folder baru', newFile: 'File baru',
+    zipFolder: 'Unduh folder .zip', search: 'Cari', reload: 'Muat ulang', logout: 'Keluar',
+    sort: 'Urut', sortName: 'nama', sortSize: 'ukuran', sortTime: 'waktu',
+    showHidden: 'Tampilkan tersembunyi', hideHidden: 'Sembunyikan tersembunyi',
+    selectAll: 'Pilih semua', clearSel: 'Batal pilih',
+    dropHere: 'Lepas file untuk mengunggah', readonlyTag: ' \u00b7 baca saja', folder: 'folder',
+    freeOf: '{free} sisa dari {total}', nItems: '{n} item', nSelected: '{n} dipilih',
+    emptyTitle: 'Folder ini kosong', emptyBody: 'Unggah file atau buat folder baru.',
+    noMatchTitle: 'Tidak ada yang cocok', noMatchBody: 'Coba kata kunci lain.',
+    loginTitle: 'Masuk ke filehub', loginNote: 'Jetson hanya bisa dibuka dari tailnet kamu.',
+    password: 'Password', signIn: 'Masuk',
+    download: 'Unduh', downloadN: 'Unduh ({n})', copy: 'Salin', cut: 'Potong',
+    deleteN: 'Hapus ({n})', pasteCopy: 'Salin {n} item ke sini', pasteMove: 'Pindahkan {n} item ke sini',
+    clearClip: 'Batalkan papan klip', clipHint: 'Buka folder tujuan, lalu tekan tombol tempel',
+    copied: '{n} item disalin', moved: '{n} item dipindah',
+    openFolder: 'Buka folder', zipItem: 'Unduh sebagai .zip', viewImage: 'Lihat gambar',
+    editText: 'Edit teks', viewText: 'Lihat isi', openTab: 'Buka di tab baru',
+    extract: 'Ekstrak di sini', duplicate: 'Duplikat', rename: 'Ganti nama',
+    makeExec: 'Jadikan bisa dijalankan', unmakeExec: 'Cabut izin jalankan', del: 'Hapus',
+    cancel: 'Batal', save: 'Simpan', create: 'Buat', close: 'Tutup', saveFile: 'Simpan file',
+    renamed: 'Nama diganti', deleteTitle: 'Hapus {n} item?',
+    deleteWarn: 'Folder dihapus beserta isinya. Tidak bisa dibatalkan.',
+    deletedN: '{n} item dihapus', folderMade: 'Folder dibuat', fileMade: 'File dibuat',
+    saved: 'Tersimpan', inFolder: 'di {p}', folderPh: 'nama-folder', filePh: 'catatan.md',
+    uploading: 'Mengunggah {n} file\u2026', uploaded: '{n} file terunggah',
+    preparing: 'Menyiapkan arsip {n} item\u2026', extracted: 'Arsip diekstrak',
+    duplicated: 'Salinan dibuat', permChanged: 'Izin diubah',
+    searchTitle: 'Cari di folder ini', searchNote: 'termasuk semua subfolder',
+    searchPh: 'nama file atau sebagian nama', searchResult: '{n} hasil untuk "{q}"',
+    truncated: ' (dipotong)', actionsFor: 'Aksi untuk {n}', failed: 'Gagal',
+    e: {
+      outside_root: 'Path di luar root.', no_folder: 'Folder tidak ditemukan.',
+      no_perm_read: 'Tidak ada izin baca folder ini.', no_file: 'File tidak ditemukan.',
+      too_big: 'File terlalu besar untuk diedit di sini.', not_text: 'Bukan file teks.',
+      is_dir: 'Itu folder, bukan file.', exists: 'Sudah ada yang bernama itu.',
+      bad_name: 'Nama tidak valid.', root_locked: 'Root tidak bisa diubah.',
+      dest_not_folder: 'Tujuan bukan folder.', not_dir_zip: 'Hanya folder yang bisa di-zip.',
+      nothing_selected: 'Tidak ada item yang dipilih.', not_archive: 'Bukan arsip yang didukung.',
+      extract_failed: 'Gagal mengekstrak arsip.', only_file: 'Hanya berlaku untuk file.',
+      query_short: 'Kata kunci minimal 2 huruf.', bad_password: 'Password salah.',
+      unauth: 'Sesi habis. Login lagi.', readonly: 'Mode baca saja aktif.'
+    }
+  },
+  en: {
+    locale: 'en-GB',
+    langBtn: 'Bahasa Indonesia',
+    upload: 'Upload', newFolder: 'New folder', newFile: 'New file',
+    zipFolder: 'Download folder as .zip', search: 'Search', reload: 'Reload', logout: 'Sign out',
+    sort: 'Sort', sortName: 'name', sortSize: 'size', sortTime: 'modified',
+    showHidden: 'Show hidden', hideHidden: 'Hide hidden',
+    selectAll: 'Select all', clearSel: 'Clear selection',
+    dropHere: 'Drop files to upload', readonlyTag: ' \u00b7 read-only', folder: 'folder',
+    freeOf: '{free} free of {total}', nItems: '{n} items', nSelected: '{n} selected',
+    emptyTitle: 'This folder is empty', emptyBody: 'Upload a file or create a folder.',
+    noMatchTitle: 'Nothing matched', noMatchBody: 'Try a different search term.',
+    loginTitle: 'Sign in to filehub', loginNote: 'This Jetson is reachable only from your tailnet.',
+    password: 'Password', signIn: 'Sign in',
+    download: 'Download', downloadN: 'Download ({n})', copy: 'Copy', cut: 'Cut',
+    deleteN: 'Delete ({n})', pasteCopy: 'Copy {n} items here', pasteMove: 'Move {n} items here',
+    clearClip: 'Clear clipboard', clipHint: 'Open the destination folder, then press the paste button',
+    copied: '{n} items copied', moved: '{n} items moved',
+    openFolder: 'Open folder', zipItem: 'Download as .zip', viewImage: 'View image',
+    editText: 'Edit text', viewText: 'View contents', openTab: 'Open in new tab',
+    extract: 'Extract here', duplicate: 'Duplicate', rename: 'Rename',
+    makeExec: 'Make executable', unmakeExec: 'Remove executable bit', del: 'Delete',
+    cancel: 'Cancel', save: 'Save', create: 'Create', close: 'Close', saveFile: 'Save file',
+    renamed: 'Renamed', deleteTitle: 'Delete {n} items?',
+    deleteWarn: 'Folders are deleted with everything inside. This cannot be undone.',
+    deletedN: '{n} items deleted', folderMade: 'Folder created', fileMade: 'File created',
+    saved: 'Saved', inFolder: 'in {p}', folderPh: 'folder-name', filePh: 'notes.md',
+    uploading: 'Uploading {n} files\u2026', uploaded: '{n} files uploaded',
+    preparing: 'Preparing an archive of {n} items\u2026', extracted: 'Archive extracted',
+    duplicated: 'Copy created', permChanged: 'Permissions changed',
+    searchTitle: 'Search this folder', searchNote: 'includes every subfolder',
+    searchPh: 'file name or part of it', searchResult: '{n} results for "{q}"',
+    truncated: ' (truncated)', actionsFor: 'Actions for {n}', failed: 'Failed',
+    e: {
+      outside_root: 'Path is outside the root.', no_folder: 'Folder not found.',
+      no_perm_read: 'No permission to read this folder.', no_file: 'File not found.',
+      too_big: 'File is too large to edit here.', not_text: 'Not a text file.',
+      is_dir: 'That is a folder, not a file.', exists: 'Something with that name already exists.',
+      bad_name: 'Invalid name.', root_locked: 'The root cannot be changed.',
+      dest_not_folder: 'Destination is not a folder.', not_dir_zip: 'Only folders can be zipped.',
+      nothing_selected: 'Nothing selected.', not_archive: 'Not a supported archive.',
+      extract_failed: 'Could not extract the archive.', only_file: 'Only applies to files.',
+      query_short: 'Search term needs at least 2 characters.', bad_password: 'Wrong password.',
+      unauth: 'Session expired. Sign in again.', readonly: 'Read-only mode is on.'
+    }
+  }
+};
+
+let lang = localStorage.getItem('filehub_lang');
+if (!L[lang]) lang = (navigator.language || '').toLowerCase().startsWith('id') ? 'id' : 'en';
+
+function t(key, vars) {
+  const pack = L[lang] || L.id;
+  let out = pack[key] !== undefined ? pack[key] : (L.id[key] !== undefined ? L.id[key] : key);
+  if (vars) for (const k in vars) out = out.split('{' + k + '}').join(vars[k]);
+  return out;
+}
+
+function emsg(data) {
+  const table = (L[lang] || L.id).e;
+  if (data && data.code && table[data.code]) return table[data.code];
+  return (data && data.detail) || t('failed');
+}
+
+// ---------- utilitas
 const $ = id => document.getElementById(id);
 const listEl = $('list'), sheet = $('sheet'), card = $('card');
 let cwd = '', items = [], picked = new Set(), cfg = {};
 let clip = null, sortBy = 'name', showHidden = false, searching = false;
-const SORTS = {name: 'nama', size: 'ukuran', time: 'waktu'};
+const SORTS = {name: 'sortName', size: 'sortSize', time: 'sortTime'};
 
 const fmtSize = n => {
   if (n < 1024) return n + ' B';
@@ -699,8 +853,10 @@ const fmtSize = n => {
   do { n /= 1024; i++; } while (n >= 1024 && i < 3);
   return n.toFixed(n < 10 ? 1 : 0) + ' ' + u[i];
 };
-const fmtDate = t => new Date(t * 1000).toLocaleString('id-ID',
+const fmtDate = ts => new Date(ts * 1000).toLocaleString(t('locale'),
   {day:'2-digit', month:'short', year:'2-digit', hour:'2-digit', minute:'2-digit'});
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 let msgTimer;
 function toast(text, bad) {
@@ -711,9 +867,9 @@ function toast(text, bad) {
 
 async function api(path, opts = {}) {
   const res = await fetch(path, opts);
-  if (res.status === 401) { askLogin(); throw new Error('unauth'); }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || 'Gagal (' + res.status + ')');
+  if (res.status === 401) { askLogin(); throw new Error('unauth'); }
+  if (!res.ok) throw new Error(emsg(data));
   return data;
 }
 
@@ -730,11 +886,10 @@ function openSheet(html, wire) {
 
 // ---------- login
 function askLogin() {
-  openSheet(`
-    <h2>Masuk ke filehub</h2>
-    <p>Jetson hanya bisa dibuka dari tailnet kamu.</p>
-    <input type="password" id="pw" placeholder="Password" autocomplete="current-password">
-    <div class="ends"><button class="act go" id="ok">Masuk</button></div>`, () => {
+  openSheet('<h2>' + esc(t('loginTitle')) + '</h2>' +
+    '<p>' + esc(t('loginNote')) + '</p>' +
+    '<input type="password" id="pw" placeholder="' + esc(t('password')) + '" autocomplete="current-password">' +
+    '<div class="ends"><button class="act go" id="ok">' + esc(t('signIn')) + '</button></div>', () => {
     const go = async () => {
       const fd = new FormData(); fd.append('password', $('pw').value);
       try {
@@ -747,7 +902,7 @@ function askLogin() {
   });
 }
 
-// ---------- listing
+// ---------- daftar isi folder
 async function load(path) {
   try {
     const data = await api('api/list?path=' + encodeURIComponent(path));
@@ -773,11 +928,11 @@ function drawCrumbs(crumbs) {
 }
 
 function visible() {
-  let out = showHidden ? items.slice() : items.filter(i => !i.name.startsWith('.'));
+  const out = showHidden ? items.slice() : items.filter(i => !i.name.startsWith('.'));
   const by = {
     name: (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
     size: (a, b) => b.size - a.size,
-    time: (a, b) => b.mtime - a.mtime,
+    time: (a, b) => b.mtime - a.mtime
   }[sortBy];
   out.sort((a, b) => (a.dir === b.dir ? by(a, b) : (a.dir ? -1 : 1)));
   return out;
@@ -787,9 +942,9 @@ function draw() {
   listEl.innerHTML = '';
   const rows = visible();
   if (!rows.length) {
-    listEl.innerHTML = searching
-      ? '<div class="empty"><b>Tidak ada yang cocok</b>Coba kata kunci lain.</div>'
-      : '<div class="empty"><b>Folder ini kosong</b>Unggah file atau buat folder baru.</div>';
+    listEl.innerHTML = '<div class="empty"><b>' +
+      esc(searching ? t('noMatchTitle') : t('emptyTitle')) + '</b>' +
+      esc(searching ? t('noMatchBody') : t('emptyBody')) + '</div>';
   }
   for (const it of rows) {
     const row = document.createElement('div');
@@ -808,13 +963,14 @@ function draw() {
     meta.className = 'meta';
     const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = it.name;
     const sub = document.createElement('span'); sub.className = 'sub';
-    const where = searching ? (it.rel.split('/').slice(0, -1).join('/') || '/') + '  ·  ' : '';
-    sub.textContent = where + (it.dir ? 'folder' : fmtSize(it.size)) + '  ·  ' + fmtDate(it.mtime) + '  ·  ' + it.mode;
+    const where = searching ? (it.rel.split('/').slice(0, -1).join('/') || '/') + '  \u00b7  ' : '';
+    sub.textContent = where + (it.dir ? t('folder') : fmtSize(it.size)) +
+      '  \u00b7  ' + fmtDate(it.mtime) + '  \u00b7  ' + it.mode;
     meta.append(nm, sub);
 
     const chev = document.createElement('button');
     chev.className = 'chev'; chev.textContent = '\u22ee';
-    chev.setAttribute('aria-label', 'Aksi untuk ' + it.name);
+    chev.setAttribute('aria-label', t('actionsFor', {n: it.name}));
     chev.onclick = e => { e.stopPropagation(); actions(it); };
 
     row.append(tick, glyph, meta, chev);
@@ -823,10 +979,10 @@ function draw() {
     listEl.appendChild(row);
   }
   const n = picked.size;
-  $('count').textContent = n ? n + ' dipilih' : rows.length + ' item';
-  $('bSort').textContent = 'Urut: ' + SORTS[sortBy];
-  $('bHidden').textContent = showHidden ? 'Sembunyikan tersembunyi' : 'Tampilkan tersembunyi';
-  $('bAll').textContent = (n && n === rows.length) ? 'Batal pilih' : 'Pilih semua';
+  $('count').textContent = n ? t('nSelected', {n: n}) : t('nItems', {n: rows.length});
+  $('bSort').textContent = t('sort') + ': ' + t(SORTS[sortBy]);
+  $('bHidden').textContent = showHidden ? t('hideHidden') : t('showHidden');
+  $('bAll').textContent = (n && n === rows.length) ? t('clearSel') : t('selectAll');
   drawSelectionBar();
   drawClipBar();
 }
@@ -837,15 +993,18 @@ function drawSelectionBar() {
   if (!picked.size) return;
   bar = document.createElement('div');
   bar.id = 'selbar'; bar.className = 'bar'; bar.style.marginTop = '2px';
+  const n = picked.size;
   const mk = (label, cls, fn) => {
     const b = document.createElement('button'); b.className = 'act ' + cls;
     b.textContent = label; b.onclick = fn; bar.appendChild(b);
   };
-  mk('Unduh (' + picked.size + ')', 'go', downloadPicked);
-  mk('Salin', '', () => setClip('copy'));
-  mk('Potong', '', () => setClip('move'));
-  mk('Hapus (' + picked.size + ')', 'danger', () => confirmDelete([...picked]));
-  mk('Batal pilih', '', () => { picked.clear(); draw(); });
+  mk(t('downloadN', {n: n}), 'go', downloadPicked);
+  if (!cfg.readonly) {
+    mk(t('copy'), '', () => setClip('copy'));
+    mk(t('cut'), '', () => setClip('move'));
+    mk(t('deleteN', {n: n}), 'danger', () => confirmDelete([...picked]));
+  }
+  mk(t('clearSel'), '', () => { picked.clear(); draw(); });
   $('bar').after(bar);
 }
 
@@ -855,20 +1014,20 @@ function drawClipBar() {
   if (!clip) return;
   bar = document.createElement('div');
   bar.id = 'clipbar'; bar.className = 'bar'; bar.style.marginTop = '2px';
-  const verb = clip.mode === 'copy' ? 'Salin' : 'Pindahkan';
   const mk = (label, cls, fn) => {
     const b = document.createElement('button'); b.className = 'act ' + cls;
     b.textContent = label; b.onclick = fn; bar.appendChild(b);
   };
-  mk(verb + ' ' + clip.paths.length + ' item ke sini', 'go', pasteHere);
-  mk('Batalkan papan klip', '', () => { clip = null; draw(); });
+  const n = clip.paths.length;
+  mk(clip.mode === 'copy' ? t('pasteCopy', {n: n}) : t('pasteMove', {n: n}), 'go', pasteHere);
+  mk(t('clearClip'), '', () => { clip = null; draw(); });
   ($('selbar') || $('bar')).after(bar);
 }
 
 function setClip(mode) {
-  clip = {mode, paths: [...picked]};
+  clip = {mode: mode, paths: [...picked]};
   picked.clear(); draw();
-  toast('Buka folder tujuan, lalu tekan tombol tempel');
+  toast(t('clipHint'));
 }
 
 async function pasteHere() {
@@ -876,7 +1035,8 @@ async function pasteHere() {
   try {
     const r = await api(url, {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({paths: clip.paths, dest: cwd})});
-    toast((r.copied ?? r.moved) + ' item ' + (clip.mode === 'copy' ? 'disalin' : 'dipindah'));
+    const n = r.copied !== undefined ? r.copied : r.moved;
+    toast(clip.mode === 'copy' ? t('copied', {n: n}) : t('moved', {n: n}));
     clip = null; load(cwd);
   } catch (e) { toast(e.message, true); }
 }
@@ -891,7 +1051,7 @@ function downloadPicked() {
   }
   const name = cwd ? cwd.split('/').pop() : 'filehub';
   const q = sel.map(p => 'paths=' + encodeURIComponent(p)).join('&');
-  toast('Menyiapkan arsip ' + sel.length + ' item…');
+  toast(t('preparing', {n: sel.length}));
   location.href = 'api/bundle?name=' + encodeURIComponent(name) + '&' + q;
 }
 
@@ -907,52 +1067,51 @@ function open(it) {
   location.href = 'api/download?path=' + encodeURIComponent(it.rel);
 }
 
-// ---------- per-item actions
+// ---------- menu aksi per item
 function actions(it) {
   const ro = cfg.readonly;
-  openSheet(`
-    <h2>${esc(it.name)}</h2>
-    <p>${esc(it.rel)}</p>
-    <div class="opts" id="opts"></div>`, () => {
+  openSheet('<h2>' + esc(it.name) + '</h2>' +
+    '<p>' + esc(it.rel) + '</p>' +
+    '<div class="opts" id="opts"></div>', () => {
     const box = $('opts');
     const add = (label, fn, cls) => {
       const b = document.createElement('button');
       b.className = 'opt ' + (cls || ''); b.textContent = label;
       b.onclick = fn; box.appendChild(b);
     };
+    if (!ro) add(t('rename'), () => renameItem(it));
     if (it.dir) {
-      add('Buka folder', () => { closeSheet(); load(it.rel); });
-      add('Unduh sebagai .zip', () => { closeSheet(); location.href = 'api/zip?path=' + encodeURIComponent(it.rel); });
+      add(t('openFolder'), () => { closeSheet(); load(it.rel); });
+      add(t('zipItem'), () => { closeSheet(); location.href = 'api/zip?path=' + encodeURIComponent(it.rel); });
     } else {
-      add('Unduh', () => { closeSheet(); location.href = 'api/download?path=' + encodeURIComponent(it.rel); });
-      if (it.image) add('Lihat gambar', () => preview(it));
-      if (it.editable) add(ro ? 'Lihat isi' : 'Edit teks', () => edit(it));
-      add('Buka di tab baru', () => { window.open('api/download?inline=1&path=' + encodeURIComponent(it.rel), '_blank'); closeSheet(); });
+      add(t('download'), () => { closeSheet(); location.href = 'api/download?path=' + encodeURIComponent(it.rel); });
+      if (it.image) add(t('viewImage'), () => preview(it));
+      if (it.editable) add(ro ? t('viewText') : t('editText'), () => edit(it));
+      add(t('openTab'), () => { window.open('api/download?inline=1&path=' + encodeURIComponent(it.rel), '_blank'); closeSheet(); });
     }
     if (!ro) {
-      if (it.archive) add('Ekstrak di sini', () => runAction('api/extract', {path: it.rel}, 'Arsip diekstrak'));
-      add('Duplikat', () => runAction('api/duplicate', {path: it.rel}, 'Salinan dibuat'));
-      add('Ganti nama', () => renameItem(it));
-      if (!it.dir) add(it.exec ? 'Cabut izin jalankan' : 'Jadikan bisa dijalankan',
-        () => runAction('api/chmod', {path: it.rel, executable: !it.exec}, 'Izin diubah'));
-      add('Hapus', () => confirmDelete([it.rel]), 'danger');
+      if (it.archive) add(t('extract'), () => runAction('api/extract', {path: it.rel}, t('extracted')));
+      add(t('duplicate'), () => runAction('api/duplicate', {path: it.rel}, t('duplicated')));
+      if (!it.dir) add(it.exec ? t('unmakeExec') : t('makeExec'),
+        () => runAction('api/chmod', {path: it.rel, executable: !it.exec}, t('permChanged')));
+      add(t('del'), () => confirmDelete([it.rel]), 'danger');
     }
   });
 }
 
-const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-
 function renameItem(it) {
-  openSheet(`
-    <h2>Ganti nama</h2>
-    <input type="text" id="nm" value="${esc(it.name)}">
-    <div class="ends"><button class="act" id="no">Batal</button><button class="act go" id="ok">Simpan</button></div>`, () => {
+  openSheet('<h2>' + esc(t('rename')) + '</h2>' +
+    '<p>' + esc(it.rel) + '</p>' +
+    '<input type="text" id="nm" value="' + esc(it.name) + '">' +
+    '<div class="ends">' +
+    '<button class="act" id="no">' + esc(t('cancel')) + '</button>' +
+    '<button class="act go" id="ok">' + esc(t('save')) + '</button></div>', () => {
     $('no').onclick = closeSheet;
     const go = async () => {
       try {
         await api('api/rename', {method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({path: it.rel, name: $('nm').value})});
-        closeSheet(); toast('Nama diganti'); load(cwd);
+        closeSheet(); toast(t('renamed')); load(cwd);
       } catch (e) { toast(e.message, true); }
     };
     $('ok').onclick = go;
@@ -961,17 +1120,19 @@ function renameItem(it) {
 }
 
 function confirmDelete(paths) {
-  openSheet(`
-    <h2>Hapus ${paths.length} item?</h2>
-    <p>${esc(paths.slice(0, 6).join('\n'))}${paths.length > 6 ? '\n…' : ''}</p>
-    <p style="color:var(--danger)">Folder dihapus beserta isinya. Tidak bisa dibatalkan.</p>
-    <div class="ends"><button class="act" id="no">Batal</button><button class="act danger" id="ok">Hapus</button></div>`, () => {
+  const listed = paths.slice(0, 6).join('\n') + (paths.length > 6 ? '\n\u2026' : '');
+  openSheet('<h2>' + esc(t('deleteTitle', {n: paths.length})) + '</h2>' +
+    '<p>' + esc(listed) + '</p>' +
+    '<p style="color:var(--danger)">' + esc(t('deleteWarn')) + '</p>' +
+    '<div class="ends">' +
+    '<button class="act" id="no">' + esc(t('cancel')) + '</button>' +
+    '<button class="act danger" id="ok">' + esc(t('del')) + '</button></div>', () => {
     $('no').onclick = closeSheet;
     $('ok').onclick = async () => {
       try {
         const r = await api('api/delete', {method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({paths})});
-        closeSheet(); toast(r.removed + ' item dihapus'); load(cwd);
+          body: JSON.stringify({paths: paths})});
+        closeSheet(); toast(t('deletedN', {n: r.removed})); load(cwd);
       } catch (e) { toast(e.message, true); }
     };
   });
@@ -987,11 +1148,12 @@ async function runAction(url, body, okMsg) {
 }
 
 function askSearch() {
-  openSheet(`
-    <h2>Cari di folder ini</h2>
-    <p>termasuk semua subfolder</p>
-    <input type="text" id="q" placeholder="nama file atau sebagian nama">
-    <div class="ends"><button class="act" id="no">Batal</button><button class="act go" id="ok">Cari</button></div>`, () => {
+  openSheet('<h2>' + esc(t('searchTitle')) + '</h2>' +
+    '<p>' + esc(t('searchNote')) + '</p>' +
+    '<input type="text" id="q" placeholder="' + esc(t('searchPh')) + '">' +
+    '<div class="ends">' +
+    '<button class="act" id="no">' + esc(t('cancel')) + '</button>' +
+    '<button class="act go" id="ok">' + esc(t('search')) + '</button></div>', () => {
     $('no').onclick = closeSheet;
     const go = async () => {
       const q = $('q').value.trim();
@@ -999,7 +1161,7 @@ function askSearch() {
         const data = await api('api/search?path=' + encodeURIComponent(cwd) + '&q=' + encodeURIComponent(q));
         closeSheet();
         items = data.items; picked.clear(); searching = true; draw();
-        toast(data.items.length + ' hasil' + (data.truncated ? ' (dipotong)' : '') + ' untuk "' + q + '"');
+        toast(t('searchResult', {n: data.items.length, q: q}) + (data.truncated ? t('truncated') : ''));
       } catch (e) { toast(e.message, true); }
     };
     $('ok').onclick = go;
@@ -1007,24 +1169,22 @@ function askSearch() {
   });
 }
 
-// ---------- editor & preview
+// ---------- editor & pratinjau
 async function edit(it) {
   try {
     const data = await api('api/read?path=' + encodeURIComponent(it.rel));
-    openSheet(`
-      <h2>${esc(it.name)}</h2>
-      <textarea id="ta" spellcheck="false"></textarea>
-      <div class="ends">
-        <button class="act" id="no">Tutup</button>
-        ${cfg.readonly ? '' : '<button class="act go" id="ok">Simpan file</button>'}
-      </div>`, () => {
+    openSheet('<h2>' + esc(it.name) + '</h2>' +
+      '<textarea id="ta" spellcheck="false"></textarea>' +
+      '<div class="ends"><button class="act" id="no">' + esc(t('close')) + '</button>' +
+      (cfg.readonly ? '' : '<button class="act go" id="ok">' + esc(t('saveFile')) + '</button>') +
+      '</div>', () => {
       $('ta').value = data.content;
       $('no').onclick = closeSheet;
       if ($('ok')) $('ok').onclick = async () => {
         try {
           await api('api/save', {method:'POST', headers:{'Content-Type':'application/json'},
             body: JSON.stringify({path: it.rel, content: $('ta').value})});
-          closeSheet(); toast('Tersimpan'); load(cwd);
+          closeSheet(); toast(t('saved')); load(cwd);
         } catch (e) { toast(e.message, true); }
       };
     });
@@ -1032,28 +1192,28 @@ async function edit(it) {
 }
 
 function preview(it) {
-  openSheet(`
-    <h2>${esc(it.name)}</h2>
-    <img src="api/download?inline=1&path=${encodeURIComponent(it.rel)}" alt="${esc(it.name)}">
-    <div class="ends"><button class="act" id="no">Tutup</button></div>`,
+  openSheet('<h2>' + esc(it.name) + '</h2>' +
+    '<img src="api/download?inline=1&path=' + encodeURIComponent(it.rel) + '" alt="' + esc(it.name) + '">' +
+    '<div class="ends"><button class="act" id="no">' + esc(t('close')) + '</button></div>',
     () => { $('no').onclick = closeSheet; });
 }
 
-// ---------- create
+// ---------- buat folder / file
 function creator(kind) {
   const isDir = kind === 'dir';
-  openSheet(`
-    <h2>${isDir ? 'Folder baru' : 'File baru'}</h2>
-    <p>di ${esc(cwd || cfg.root)}</p>
-    <input type="text" id="nm" placeholder="${isDir ? 'nama-folder' : 'catatan.md'}">
-    <div class="ends"><button class="act" id="no">Batal</button><button class="act go" id="ok">Buat</button></div>`, () => {
+  openSheet('<h2>' + esc(isDir ? t('newFolder') : t('newFile')) + '</h2>' +
+    '<p>' + esc(t('inFolder', {p: cwd || cfg.root})) + '</p>' +
+    '<input type="text" id="nm" placeholder="' + esc(isDir ? t('folderPh') : t('filePh')) + '">' +
+    '<div class="ends">' +
+    '<button class="act" id="no">' + esc(t('cancel')) + '</button>' +
+    '<button class="act go" id="ok">' + esc(t('create')) + '</button></div>', () => {
     $('no').onclick = closeSheet;
     const go = async () => {
       try {
         await api(isDir ? 'api/mkdir' : 'api/newfile', {method:'POST',
           headers:{'Content-Type':'application/json'},
           body: JSON.stringify({path: cwd, name: $('nm').value})});
-        closeSheet(); toast(isDir ? 'Folder dibuat' : 'File dibuat'); load(cwd);
+        closeSheet(); toast(isDir ? t('folderMade') : t('fileMade')); load(cwd);
       } catch (e) { toast(e.message, true); }
     };
     $('ok').onclick = go;
@@ -1061,16 +1221,16 @@ function creator(kind) {
   });
 }
 
-// ---------- upload
+// ---------- unggah
 async function send(files) {
   if (!files || !files.length) return;
   const fd = new FormData();
   fd.append('path', cwd);
   for (const f of files) fd.append('files', f);
-  toast('Mengunggah ' + files.length + ' file…');
+  toast(t('uploading', {n: files.length}));
   try {
     const r = await api('api/upload', {method:'POST', body: fd});
-    toast(r.saved.length + ' file terunggah'); load(cwd);
+    toast(t('uploaded', {n: r.saved.length})); load(cwd);
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1088,9 +1248,9 @@ addEventListener('drop', e => {
 $('bUp').onclick = () => $('picker').click();
 $('bFolder').onclick = () => creator('dir');
 $('bFile').onclick = () => creator('file');
-$('bZip').onclick = () => location.href = 'api/zip?path=' + encodeURIComponent(cwd);
-$('bReload').onclick = () => load(cwd);
+$('bZip').onclick = () => { location.href = 'api/zip?path=' + encodeURIComponent(cwd); };
 $('bCari').onclick = askSearch;
+$('bReload').onclick = () => load(cwd);
 $('bSort').onclick = () => {
   const keys = Object.keys(SORTS);
   sortBy = keys[(keys.indexOf(sortBy) + 1) % keys.length];
@@ -1103,18 +1263,39 @@ $('bAll').onclick = () => {
   else rows.forEach(i => picked.add(i.rel));
   draw();
 };
+$('bLang').onclick = () => {
+  lang = lang === 'id' ? 'en' : 'id';
+  try { localStorage.setItem('filehub_lang', lang); } catch (err) {}
+  applyLang(); draw();
+};
 $('bOut').onclick = async () => { await fetch('api/logout', {method:'POST'}); location.reload(); };
 
-// ---------- boot
+// ---------- label statis mengikuti bahasa
+function applyLang() {
+  document.documentElement.lang = lang;
+  $('bUp').textContent = t('upload');
+  $('bFolder').textContent = t('newFolder');
+  $('bFile').textContent = t('newFile');
+  $('bZip').textContent = t('zipFolder');
+  $('bCari').textContent = t('search');
+  $('bReload').textContent = t('reload');
+  $('bLang').textContent = t('langBtn');
+  $('bOut').textContent = t('logout');
+  $('dropText').textContent = t('dropHere');
+  if (cfg.root) {
+    $('host').innerHTML = esc(cfg.host) + '<br>' + esc(cfg.root) + (cfg.readonly ? esc(t('readonlyTag')) : '');
+    $('disk').textContent = t('freeOf', {free: fmtSize(cfg.disk.free), total: fmtSize(cfg.disk.total)});
+  }
+}
+
+// ---------- mulai
 async function boot() {
   cfg = await (await fetch('api/config')).json();
   $('ver').textContent = 'v' + cfg.version;
-  $('host').innerHTML = esc(cfg.host) + '<br>' + esc(cfg.root) + (cfg.readonly ? ' · baca saja' : '');
-  const pct = cfg.disk.used / cfg.disk.total * 100;
-  $('gauge').style.width = pct.toFixed(0) + '%';
-  $('disk').textContent = fmtSize(cfg.disk.free) + ' sisa dari ' + fmtSize(cfg.disk.total);
+  $('gauge').style.width = (cfg.disk.used / cfg.disk.total * 100).toFixed(0) + '%';
+  applyLang();
   if (!cfg.locked) $('bOut').style.display = 'none';
-  if (cfg.readonly) ['bUp','bFolder','bFile'].forEach(id => $(id).disabled = true);
+  if (cfg.readonly) ['bUp','bFolder','bFile'].forEach(id => { $(id).disabled = true; });
   if (!cfg.authed) return askLogin();
   load('');
 }

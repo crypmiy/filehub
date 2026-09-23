@@ -5,6 +5,22 @@ penomoran mengikuti [Semantic Versioning](https://semver.org/lang/id/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-23
+
+### Ditambahkan
+- Pilihan bahasa antarmuka: Indonesia dan Inggris, lewat tombol di bilah alat.
+  Pilihan disimpan di peramban, dan bahasa pertama mengikuti pengaturan peramban.
+- Pesan galat dari server kini membawa kode tetap, sehingga antarmuka bisa
+  menampilkannya dalam bahasa yang sedang dipakai.
+
+### Diperbaiki
+- Menu aksi per berkas kini bisa digulir. Sebelumnya, pada layar pendek daftar
+  aksi terpotong sehingga **Ganti nama** dan **Hapus** tidak terlihat.
+- **Ganti nama** dipindah ke urutan teratas menu aksi, dan lembarnya menampilkan
+  path lengkap berkas yang sedang diganti.
+- Bilah pilihan menyembunyikan Salin, Potong, dan Hapus saat mode baca saja aktif;
+  sebelumnya tombolnya tetap muncul lalu ditolak server.
+
 ## [1.2.0] - 2026-09-23
 
 ### Ditambahkan
@@ -56,7 +72,8 @@ Rilis pertama.
 - Password dibandingkan dengan `hmac.compare_digest` dan diberi jeda saat gagal.
 - Default bind ke `127.0.0.1`; akses dari luar diharapkan lewat Tailscale.
 
-[Unreleased]: https://github.com/crypmiy/filehub/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/crypmiy/filehub/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/crypmiy/filehub/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/crypmiy/filehub/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/crypmiy/filehub/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/crypmiy/filehub/releases/tag/v1.0.0

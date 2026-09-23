@@ -19,6 +19,7 @@ lewat lembar geser, dan tombol besar yang enak ditekan dengan jempol.
 - Ekstrak arsip `.zip` dan `.tar.*` ke folder baru
 - Cari nama berkas secara rekursif, urutkan menurut nama/ukuran/waktu
 - Tampilkan berkas bertitik, pilih semua, ubah izin jalankan (`chmod +x`)
+- Antarmuka dwibahasa: Indonesia dan Inggris, bisa diganti kapan saja
 - Login password opsional, mode baca saja, indikator sisa disk
 
 ## Pemasangan
